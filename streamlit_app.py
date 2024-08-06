@@ -1,24 +1,39 @@
 import streamlit as st
 from pinecone import Pinecone, ServerlessSpec
-import openai
 import time
-from openai import OpenAI
-import tiktoken
-from tiktoken import get_encoding
 import os
 from dotenv import load_dotenv
 import random
 import pandas as pd
 from docx import Document
 from database_operations import get_database_connection, init_db, load_initial_data, get_all_products, query_db_for_keywords, add_product, delete_product, update_product, get_product_by_id
+from langchain.chat_models import ChatOpenAI
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.schema import HumanMessage, SystemMessage
+from langchain.callbacks import get_openai_callback
+from langsmith import trace
+import functools
 
-# Load environment variables and initialize clients
+# Load environment variables
 load_dotenv()
-# Access your API key
-OPENAI_API_KEY = st.secrets("OPENAI_API_KEY")
-PINECONE_API_KEY = st.secrets("PINECONE_API_KEY")
-client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Load API keys and set environment variables
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
+LANGCHAIN_API_KEY = st.secrets["LANGCHAIN_API_KEY"]
+
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+os.environ["LANGCHAIN_API_KEY"] = LANGCHAIN_API_KEY
+os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+os.environ["LANGCHAIN_PROJECT"] = "Bents-Woodworking-Assistant"
+
+from langsmith import Client
+langsmith_client = Client(api_key=LANGCHAIN_API_KEY)
+
+# Initialize clients
 pc = Pinecone(api_key=PINECONE_API_KEY)
+
 INDEX_NAME = "bents-woodworking"
 
 # Initialize Pinecone index
@@ -47,59 +62,41 @@ EXAMPLE_QUESTIONS = [
     "How does the Festool Bluetooth Switch enhance dust extractor control?"
 ]
 
-# Function to extract text from DOCX
+from langsmith import trace
+
+def safe_run_tree(name, run_type):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                with trace(name=name, run_type=run_type, client=langsmith_client) as run:
+                    result = func(*args, **kwargs)
+                    run.end(outputs={"result": str(result)})
+                    return result
+            except Exception as e:
+                st.error(f"Error in LangSmith tracing: {str(e)}")
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
 def extract_text_from_docx(file):
     doc = Document(file)
     text = "\n".join([para.text for para in doc.paragraphs])
     return text
 
-# Function to extract metadata from text
 def extract_metadata_from_text(text):
     title = text.split('\n')[0] if text else "Untitled Video"
     return {"title": title}
 
-# Function to truncate text
-def truncate_text(text, max_tokens):
-    tokenizer = get_encoding("cl100k_base")
-    tokens = tokenizer.encode(text)
-    return tokenizer.decode(tokens[:max_tokens])
-
-# Function to count tokens
-def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> int:
-    encoding = tiktoken.get_encoding(encoding_name)
-    num_tokens = len(encoding.encode(string))
-    return num_tokens
-
-# Function to chunk text
-def chunk_text(text, max_tokens):
-    tokenizer = get_encoding("cl100k_base")
-    tokens = tokenizer.encode(text)
-    chunks = []
-    for i in range(0, len(tokens), max_tokens):
-        chunk = tokens[i:i + max_tokens]
-        chunks.append(tokenizer.decode(chunk))
-    return chunks
-
-# Function to generate embeddings with retries
+@safe_run_tree(name="generate_embedding", run_type="llm")
 def generate_embedding(text):
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            truncated_text = truncate_text(text, 8000)
-            response = client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=truncated_text
-            )
-            return response.data[0].embedding
-        except Exception as e:
-            if attempt == max_retries - 1:
-                st.error(f"Error creating embedding after {max_retries} attempts: {str(e)}")
-                return None
-            time.sleep(2 ** attempt)
+    embeddings = OpenAIEmbeddings()
+    with get_openai_callback() as cb:
+        embedding = embeddings.embed_query(text)
+    return embedding
 
-# Function to upsert data into Pinecone
 def upsert_transcript(transcript_text, metadata):
-    chunks = chunk_text(transcript_text, 8000)
+    chunks = [transcript_text[i:i+8000] for i in range(0, len(transcript_text), 8000)]
     for i, chunk in enumerate(chunks):
         embedding = generate_embedding(chunk)
         if embedding:
@@ -108,7 +105,6 @@ def upsert_transcript(transcript_text, metadata):
             chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
             index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
 
-# Function to query Pinecone
 def query_pinecone(query, index):
     query_embedding = generate_embedding(query)
     if query_embedding:
@@ -121,50 +117,41 @@ def query_pinecone(query, index):
     else:
         return []
 
-# Function to generate keywords
+@safe_run_tree(name="generate_keywords", run_type="llm")
 def generate_keywords(text):
-    keyword_prompt = f"Generate 3-5 highly relevant and specific keywords or short phrases from this text, separated by commas. Focus on technical terms, tool names, or specific woodworking techniques: {text}"
-    keyword_response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are a keyword extraction assistant specialized in woodworking terminology. Generate concise, highly relevant keywords or short phrases from the given text."},
-            {"role": "user", "content": keyword_prompt}
-        ]
-    )
-    keywords = keyword_response.choices[0].message.content.strip().split(',')
+    chat = ChatOpenAI(model_name="gpt-4o", temperature=0)
+    
+    system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking terminology. Your task is to identify and extract the most relevant technical terms, tool names, materials, techniques, and concepts from the given text. Adhere to these guidelines:\n\n1. Focus exclusively on woodworking-related terms and concepts.\n2. Prioritize specificity over generality in your selections.\n3. Include both common and specialized woodworking terminology.\n4. If brand names are mentioned, include them only if they're standard in the industry.\n5. Aim for a mix of nouns (tools, materials) and verb phrases (techniques, processes).\n6. If the text is long, focus on the most significant terms.\n9. Ensure each keyword or phrase is distinct and non-redundant and Separate keywords with commas.")
+    human_message = HumanMessage(content=f"Generate 3-5 highly relevant and specific keywords or short phrases from this text, separated by commas. Focus on technical terms, tool names, or specific woodworking techniques: {text}")
+    
+    with get_openai_callback() as cb:
+        response = chat([system_message, human_message])
+    
+    keywords = response.content.strip().split(',')
     return [keyword.strip().lower() for keyword in keywords if keyword.strip()]
 
-# Function to get answer from GPT-4o
+@safe_run_tree(name="get_answer", run_type="chain")
 def get_answer(context, user_query):
-    max_context_tokens = 3000
-    truncated_context = truncate_text(context, max_context_tokens)
+    chat = ChatOpenAI(model_name="gpt-4o", temperature=0)
+    
+    system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking queries. Your task is to identify and extract the most relevant terms from the user's question. Follow these guidelines:\n\n1. Focus on woodworking-specific terminology, techniques, tools, and concepts.\n2. Prioritize technical terms and specific woodworking.\n3. Include tool names, wood types, joinery methods, and finishing techniques if mentioned.\n4. Extract any measurement terms or numerical values related to woodworking.\n5. If the query mentions specific brands or products, include them.\n6. Look for action verbs related to woodworking processes.\n7. Consider any terms related to wood properties or characteristics.\n8. Aim for 3-5 highly relevant keywords or short phrases.\n9. Separate keywords with commas and avoid redundancy.\n10. Do not add any explanations or commentary - output only the keywords.")
+    human_message = HumanMessage(content=f"Answer the following question based on the context: {context}\n\nQuestion: {user_query}")
+    
+    with get_openai_callback() as cb:
+        response = chat([system_message, human_message])
+    initial_answer = response.content
     
     query_keywords = generate_keywords(user_query)
-    
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are an assistant expert representing Jason Bent on woodworking based on information uploaded in the document. You are an AI assistant focused on explaining answers to questions based on how Jason Bent would answer. At any time you provide a response, include citations for title of the video the information is from and the timestamp of where the relevant information is presented from. Provide response as if you are Jason Bent in that particular tense. Do not include any links or URLs in your response."},
-            {"role": "user", "content": f"Answer the following question based on the context: {truncated_context}\n\nQuestion: {user_query}"}
-        ]
-    )
-    initial_answer = response.choices[0].message.content.strip()
-    
     answer_keywords = generate_keywords(initial_answer)
-    
     all_keywords = list(set(query_keywords + answer_keywords))
-    
     related_products = query_db_for_keywords(all_keywords)
     
-    final_response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are an assistant expert representing Jason Bent on woodworking. Incorporate the related product information if relevant, but do not include any links or URLs in your response."},
-            {"role": "user", "content": f"Initial Answer: {initial_answer}\n\nRelated Products: {related_products}\n\nPlease provide a final answer that incorporates information from the related products, if relevant, without mentioning specific product names or including any links."}
-        ]
-    )
-   
-    final_answer = final_response.choices[0].message.content.strip()
+    system_message_2 = SystemMessage(content="You are Jason Bent's woodworking expertise embodied in an AI. Your task:1. Compare query and answer keywords, focusing on woodworking terms.2. Search the context for relevant information using these keywords.3. Integrate useful aspects of related products without naming them.4. Craft a comprehensive response that: Directly addresses the user's query, Incorporates relevant information from the initial answer and context, Reflects Jason's expertise and communication style, Includes specific techniques, tips, or advice, Balances technical accuracy with accessibility, 5. Reference video titles and timestamps for key information., 6. Ensure the answer is cohesive, relevant, and follows safety best practices.")
+    human_message_2 = HumanMessage(content=f"Initial Answer: {initial_answer}\n\nRelated Products: {related_products}\n\nPlease provide a final answer that incorporates information from the related products, if relevant, without mentioning specific product names or including any links.")
+    
+    with get_openai_callback() as cb:
+        final_response = chat([system_message_2, human_message_2])
+    final_answer = final_response.content
     
     return final_answer, related_products, all_keywords
 
@@ -177,28 +164,57 @@ def process_query(query):
                 retrieved_titles = [title for title, _ in matches]
                 context = " ".join([f"Title: {title}\n{text}" for title, text in zip(retrieved_titles, retrieved_texts)])
                 final_answer, related_products, keywords = get_answer(context, query)
-                st.write(final_answer)
                 
-                # Display YouTube video as a smaller miniplayer
+                # Find the related video
+                related_video = None
                 for title in retrieved_titles:
                     if title in YOUTUBE_LINKS:
-                        st.subheader(f"Related Video: {title}")
-                        video_id = YOUTUBE_LINKS[title].split("v=")[1].split("&")[0]
-                        st.markdown(f"""
-                            <iframe width="320" height="180" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
-                        """, unsafe_allow_html=True)
-                        break  # Display only the first matching video
+                        related_video = title
+                        break
+
+                # Display the answer
+                st.write(final_answer)
                 
-                st.subheader("Related Products:")
-                if related_products:
-                    for product in related_products:
-                        st.markdown(f"[{product[1]}]({product[3]})")
-                else:
-                    st.write("No related products found.")
+                # Add some vertical space
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                
+                # Create two columns: video and related products
+                col1, space, col2 = st.columns([0.47, 0.20, 0.47])
+                
+                # Column 1: Display YouTube video
+                with col1:
+                    st.subheader("Related Video")
+                    video_displayed = False
+                    for title in retrieved_titles:
+                        if title in YOUTUBE_LINKS:
+                            video_id = YOUTUBE_LINKS[title].split("v=")[1].split("&")[0]
+                            st.markdown(f"""
+                                <iframe width="100%" height="315" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                            """, unsafe_allow_html=True)
+                            st.caption(f"Video: {title}")
+                            video_displayed = True
+                            break  # Display only the first matching video
+                    if not video_displayed:
+                        st.write("No related video found.")
+                # Middle column: Empty space
+                with space:
+                    st.empty()
+                
+                # Column 2: Display related products
+                with col2:
+                    st.subheader("Related Products")
+                    if related_products:
+                        for product in related_products:
+                            st.markdown(f"[{product[1]}]({product[3]})")
+                    else:
+                        st.write("No related products found.")
+                
+                # Add some more vertical space after the columns
+                st.markdown("<br><br>", unsafe_allow_html=True)
                 
                 if 'chat_history' not in st.session_state:
                     st.session_state.chat_history = []
-                st.session_state.chat_history.append((query, final_answer, related_products))
+                st.session_state.chat_history.append((query, final_answer, related_products, related_video))
             else:
                 st.warning("I couldn't find a specific answer to your question. Please try rephrasing or ask something else.")
     else:
@@ -207,45 +223,58 @@ def process_query(query):
 def query_interface():
     st.header("Woodworking Assistant")
 
-    # Initialize selected questions and current query in session state
     if 'selected_questions' not in st.session_state:
         st.session_state.selected_questions = random.sample(EXAMPLE_QUESTIONS, 3)
     if 'current_query' not in st.session_state:
         st.session_state.current_query = ""
 
-    # Display popular questions
     st.subheader("Popular Questions")
     for question in st.session_state.selected_questions:
         if st.button(question, key=question):
             st.session_state.current_query = question
 
-    # User input and Get Answer button
     user_query = st.text_input("What would you like to know about woodworking?")
     if st.button("Get Answer"):
         st.session_state.current_query = user_query
 
-    # Process the query and display response
     if st.session_state.current_query:
         st.subheader("Response:")
         process_query(st.session_state.current_query)
-        # Clear the query after processing
         st.session_state.current_query = ""
 
-    # Add a section for displaying recent questions and answers
     if 'chat_history' in st.session_state and st.session_state.chat_history:
         st.header("Recent Questions and Answers")
-        for i, (q, a, products) in enumerate(reversed(st.session_state.chat_history[-5:])):
+        for i, (q, a, products, video_title) in enumerate(reversed(st.session_state.chat_history[-5:])):
             with st.expander(f"Q: {q}"):
                 st.write(f"A: {a}")
-                if products:
-                    st.subheader("Related Products:")
-                    for product in products:
-                        st.markdown(f"[{product[1]}]({product[3]})")
+                
+                # Create two columns for video and products
+                col1, col2 = st.columns([0.5, 0.5])
+                
+                # Column 1: Display related video
+                with col1:
+                    st.subheader("Related Video")
+                    if video_title and video_title in YOUTUBE_LINKS:
+                        video_id = YOUTUBE_LINKS[video_title].split("v=")[1].split("&")[0]
+                        st.markdown(f"""
+                            <iframe width="100%" height="215" src="https://www.youtube.com/embed/{video_id}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                        """, unsafe_allow_html=True)
+                        st.caption(f"Video: {video_title}")
+                    else:
+                        st.write("No related video found.")
+                
+                # Column 2: Display related products
+                with col2:
+                    st.subheader("Related Products")
+                    if products:
+                        for product in products:
+                            st.markdown(f"[{product[1]}]({product[3]})")
+                    else:
+                        st.write("No related products found.")
 
 def database_interface():
-    st.header("Database Management")
+    
 
-    # Display all products
     st.subheader("All Products")
     products = get_all_products()
     if products:
@@ -254,7 +283,6 @@ def database_interface():
     else:
         st.write("The database is empty.")
 
-    # Add new product
     st.subheader("Add New Product")
     new_title = st.text_input("Title")
     new_tags = st.text_input("Tags (comma-separated)")
@@ -266,7 +294,6 @@ def database_interface():
         else:
             st.warning("Please fill in all fields.")
 
-    # Update product
     st.subheader("Update Product")
     update_id = st.number_input("Enter Product ID to update", min_value=1, step=1)
     product = get_product_by_id(update_id)
@@ -280,16 +307,17 @@ def database_interface():
     else:
         st.warning(f"No product found with ID {update_id}")
 
-    # Delete product
     st.subheader("Delete Product")
     delete_id = st.number_input("Enter Product ID to delete", min_value=1, step=1)
     if st.button("Delete Product"):
         delete_product(delete_id)
         st.success(f"Product with ID {delete_id} deleted successfully!")
 
-# Main Streamlit app
 def main():
     st.set_page_config(page_title="Bent's Woodworking Assistant", layout="wide")
+
+    if not LANGCHAIN_API_KEY:
+        st.warning("LangSmith API key is not set. Some features may not work properly.")
 
     # Add the logo to the main page
     st.image("bents logo.png", width=150)
@@ -321,12 +349,9 @@ def main():
                     transcript_text = extract_text_from_docx(uploaded_file)
                     metadata = extract_metadata_from_text(transcript_text)
                     all_metadata.append((metadata, transcript_text))
-                    token_count = num_tokens_from_string(transcript_text)
-                    total_token_count += token_count
                 st.subheader("Uploaded Transcripts")
                 for metadata, _ in all_metadata:
                     st.text(f"Title: {metadata['title']}")
-                st.text(f"Total token count: {total_token_count}")
                 if st.button("Upsert All Transcripts"):
                     with st.spinner("Upserting transcripts..."):
                         for metadata, transcript_text in all_metadata:
