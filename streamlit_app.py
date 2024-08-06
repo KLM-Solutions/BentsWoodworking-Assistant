@@ -119,7 +119,7 @@ def query_pinecone(query, index):
 
 @safe_run_tree(name="generate_keywords", run_type="llm")
 def generate_keywords(text):
-    chat = ChatOpenAI(model_name="gpt-4o", temperature=0)
+    chat = ChatOpenAI(model_name="gpt-4o", temperature=0.3)
     
     system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking terminology. Your task is to identify and extract the most relevant technical terms, tool names, materials, techniques, and concepts from the given text. Adhere to these guidelines:\n\n1. Focus exclusively on woodworking-related terms and concepts.\n2. Prioritize specificity over generality in your selections.\n3. Include both common and specialized woodworking terminology.\n4. If brand names are mentioned, include them only if they're standard in the industry.\n5. Aim for a mix of nouns (tools, materials) and verb phrases (techniques, processes).\n6. If the text is long, focus on the most significant terms.\n9. Ensure each keyword or phrase is distinct and non-redundant and Separate keywords with commas.")
     human_message = HumanMessage(content=f"Generate 3-5 highly relevant and specific keywords or short phrases from this text, separated by commas. Focus on technical terms, tool names, or specific woodworking techniques: {text}")
@@ -132,7 +132,7 @@ def generate_keywords(text):
 
 @safe_run_tree(name="get_answer", run_type="chain")
 def get_answer(context, user_query):
-    chat = ChatOpenAI(model_name="gpt-4o", temperature=0)
+    chat = ChatOpenAI(model_name="gpt-4o", temperature=0.3)
     
     system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking queries. Your task is to identify and extract the most relevant terms from the user's question. Follow these guidelines:\n\n1. Focus on woodworking-specific terminology, techniques, tools, and concepts.\n2. Prioritize technical terms and specific woodworking.\n3. Include tool names, wood types, joinery methods, and finishing techniques if mentioned.\n4. Extract any measurement terms or numerical values related to woodworking.\n5. If the query mentions specific brands or products, include them.\n6. Look for action verbs related to woodworking processes.\n7. Consider any terms related to wood properties or characteristics.\n8. Aim for 3-5 highly relevant keywords or short phrases.\n9. Separate keywords with commas and avoid redundancy.\n10. Do not add any explanations or commentary - output only the keywords.")
     human_message = HumanMessage(content=f"Answer the following question based on the context: {context}\n\nQuestion: {user_query}")
