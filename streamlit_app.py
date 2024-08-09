@@ -13,7 +13,6 @@ from langchain.schema import HumanMessage, SystemMessage
 from langchain.callbacks import get_openai_callback
 from langsmith import trace
 import functools
-import logging
 
 # Load environment variables
 load_dotenv()
@@ -96,22 +95,15 @@ def generate_embedding(text):
         embedding = embeddings.embed_query(text)
     return embedding
 
-
 def upsert_transcript(transcript_text, metadata):
     chunks = [transcript_text[i:i+8000] for i in range(0, len(transcript_text), 8000)]
     for i, chunk in enumerate(chunks):
-        try:
-            embedding = generate_embedding(chunk)
-            if embedding:
-                chunk_metadata = metadata.copy()
-                chunk_metadata['text'] = chunk
-                chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
-                index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
-            else:
-                logging.warning(f"Failed to generate embedding for chunk {i} of {metadata['title']}")
-        except Exception as e:
-            logging.error(f"Error upserting chunk {i} of {metadata['title']}: {str(e)}")
-            st.error(f"Error upserting chunk {i} of {metadata['title']}: {str(e)}")
+        embedding = generate_embedding(chunk)
+        if embedding:
+            chunk_metadata = metadata.copy()
+            chunk_metadata['text'] = chunk
+            chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
+            index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
 
 def query_pinecone(query, index):
     query_embedding = generate_embedding(query)
@@ -127,7 +119,7 @@ def query_pinecone(query, index):
 
 @safe_run_tree(name="generate_keywords", run_type="llm")
 def generate_keywords(text):
-    chat = ChatOpenAI(model_name="gpt-4o", temperature=0.3)
+    chat = ChatOpenAI(model_name="gpt-4o", temperature=0)
     
     system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking terminology. Your task is to identify and extract the most relevant technical terms, tool names, materials, techniques, and concepts from the given text. Adhere to these guidelines:\n\n1. Focus exclusively on woodworking-related terms and concepts.\n2. Prioritize specificity over generality in your selections.\n3. Include both common and specialized woodworking terminology.\n4. If brand names are mentioned, include them only if they're standard in the industry.\n5. Aim for a mix of nouns (tools, materials) and verb phrases (techniques, processes).\n6. If the text is long, focus on the most significant terms.\n9. Ensure each keyword or phrase is distinct and non-redundant and Separate keywords with commas.")
     human_message = HumanMessage(content=f"Generate 3-5 highly relevant and specific keywords or short phrases from this text, separated by commas. Focus on technical terms, tool names, or specific woodworking techniques: {text}")
@@ -140,7 +132,7 @@ def generate_keywords(text):
 
 @safe_run_tree(name="get_answer", run_type="chain")
 def get_answer(context, user_query):
-    chat = ChatOpenAI(model_name="gpt-4o", temperature=0.3)
+    chat = ChatOpenAI(model_name="gpt-4o", temperature=0)
     
     system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking queries. Your task is to identify and extract the most relevant terms from the user's question. Follow these guidelines:\n\n1. Focus on woodworking-specific terminology, techniques, tools, and concepts.\n2. Prioritize technical terms and specific woodworking.\n3. Include tool names, wood types, joinery methods, and finishing techniques if mentioned.\n4. Extract any measurement terms or numerical values related to woodworking.\n5. If the query mentions specific brands or products, include them.\n6. Look for action verbs related to woodworking processes.\n7. Consider any terms related to wood properties or characteristics.\n8. Aim for 3-5 highly relevant keywords or short phrases.\n9. Separate keywords with commas and avoid redundancy.\n10. Do not add any explanations or commentary - output only the keywords.")
     human_message = HumanMessage(content=f"Answer the following question based on the context: {context}\n\nQuestion: {user_query}")
