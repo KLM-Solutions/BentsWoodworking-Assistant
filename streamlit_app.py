@@ -83,6 +83,18 @@ def extract_text_from_docx(file):
     doc = Document(file)
     text = "\n".join([para.text for para in doc.paragraphs])
     return text
+    import re
+
+def sanitize_id(text):
+    # Replace spaces with underscores and remove any other non-alphanumeric characters
+    sanitized = re.sub(r'\s+', '_', text)
+    sanitized = re.sub(r'[^a-zA-Z0-9_]', '', sanitized)
+    # Ensure the ID starts with a letter or underscore
+    if not sanitized[0].isalpha() and sanitized[0] != '_':
+        sanitized = '_' + sanitized
+    # Limit the length of the ID (Pinecone might have a maximum length requirement)
+    sanitized = sanitized[:36]  # Adjust this number if needed
+    return sanitized
 
 def extract_metadata_from_text(text):
     title = text.split('\n')[0] if text else "Untitled Video"
@@ -98,12 +110,19 @@ def generate_embedding(text):
 def upsert_transcript(transcript_text, metadata):
     chunks = [transcript_text[i:i+8000] for i in range(0, len(transcript_text), 8000)]
     for i, chunk in enumerate(chunks):
-        embedding = generate_embedding(chunk)
-        if embedding:
-            chunk_metadata = metadata.copy()
-            chunk_metadata['text'] = chunk
-            chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
-            index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
+        try:
+            embedding = generate_embedding(chunk)
+            if embedding:
+                chunk_metadata = metadata.copy()
+                chunk_metadata['text'] = chunk
+                sanitized_title = sanitize_id(metadata['title'])
+                chunk_id = f"{sanitized_title}_chunk_{i}"
+                chunk_metadata['chunk_id'] = chunk_id
+                index.upsert([(chunk_id, embedding, chunk_metadata)])
+            else:
+                st.warning(f"Failed to generate embedding for chunk {i} of {metadata['title']}")
+        except Exception as e:
+            st.error(f"Error upserting chunk {i} of {metadata['title']}: {str(e)}")
 
 def query_pinecone(query, index):
     query_embedding = generate_embedding(query)
