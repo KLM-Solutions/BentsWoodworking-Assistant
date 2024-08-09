@@ -13,6 +13,7 @@ from langchain.schema import HumanMessage, SystemMessage
 from langchain.callbacks import get_openai_callback
 from langsmith import trace
 import functools
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -95,15 +96,22 @@ def generate_embedding(text):
         embedding = embeddings.embed_query(text)
     return embedding
 
+
 def upsert_transcript(transcript_text, metadata):
     chunks = [transcript_text[i:i+8000] for i in range(0, len(transcript_text), 8000)]
     for i, chunk in enumerate(chunks):
-        embedding = generate_embedding(chunk)
-        if embedding:
-            chunk_metadata = metadata.copy()
-            chunk_metadata['text'] = chunk
-            chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
-            index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
+        try:
+            embedding = generate_embedding(chunk)
+            if embedding:
+                chunk_metadata = metadata.copy()
+                chunk_metadata['text'] = chunk
+                chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
+                index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
+            else:
+                logging.warning(f"Failed to generate embedding for chunk {i} of {metadata['title']}")
+        except Exception as e:
+            logging.error(f"Error upserting chunk {i} of {metadata['title']}: {str(e)}")
+            st.error(f"Error upserting chunk {i} of {metadata['title']}: {str(e)}")
 
 def query_pinecone(query, index):
     query_embedding = generate_embedding(query)
