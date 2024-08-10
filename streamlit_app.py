@@ -45,7 +45,7 @@ index = pc.Index(INDEX_NAME)
 YOUTUBE_LINKS = {
     "Basics of Cabinet Building": "https://www.youtube.com/watch?v=Oeu7ogH2NZU&t=3910s",
     "Graco Ultimate Sprayer": "https://www.youtube.com/watch?v=T8BIpNzdh7M&t=264s",
-    "Festool LR32 system": "https://www.youtube.com/watch?v=EO62T1LHdNA"
+    "Festool LR32 system": "https://www.youtube.com/watch?v=EO62T1LHdNA",
     "Building Base Cabinets - Step by Step": "https://www.youtube.com/watch?v=mNQi2UOFmSo"
 }
 
