@@ -7,3 +7,4 @@ python-docx
 langchain
 langsmith
 uuid
+langchain-community
