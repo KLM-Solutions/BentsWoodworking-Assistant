@@ -105,7 +105,6 @@ def upsert_transcript(transcript_text, metadata):
             chunk_metadata['chunk_id'] = f"{metadata['title']}_chunk_{i}"
             index.upsert([(chunk_metadata['chunk_id'], embedding, chunk_metadata)])
 
-
 def query_pinecone(query, index):
     query_embedding = generate_embedding(query)
     if query_embedding:
