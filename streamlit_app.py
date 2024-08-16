@@ -362,7 +362,7 @@ def query_transcripts(query):
 
 @safe_run_tree(name="generate_keywords", run_type="llm")
 def generate_keywords(text):
-    chat = ChatOpenAI(model_name="gpt-4", temperature=0)
+    chat = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
     
     system_message = SystemMessage(content="You are a specialized keyword extraction system for woodworking terminology. Extract 3-5 highly relevant and specific keywords or short phrases from the given text, focusing on technical terms, tool names, or specific woodworking techniques.")
     human_message = HumanMessage(content=f"Generate keywords from this text: {text}")
@@ -375,7 +375,7 @@ def generate_keywords(text):
 
 @safe_run_tree(name="get_answer", run_type="chain")
 def get_answer(context, user_query):
-    chat = ChatOpenAI(model_name="gpt-4", temperature=0)
+    chat = ChatOpenAI(model_name="gpt-4o-mini", temperature=0)
     
     system_message = SystemMessage(content="You are Jason Bent's woodworking expertise embodied in an AI. Answer the user's query based on the provided context, incorporating relevant product information without mentioning specific product names.")
     human_message = HumanMessage(content=f"Context: {context}\n\nQuestion: {user_query}")
